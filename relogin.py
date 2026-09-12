@@ -131,10 +131,23 @@ def main():
 
         delete_link = target_row.locator("a[href*='delete=']").first
         href = delete_link.get_attribute("href")
-        print(f"Delete link: {href}")
+        print(f"Delete link (for reference): {href}")
 
-        page.goto(href, wait_until="networkidle")
-        print(f"Logout request sent for target session. Final URL: {page.url}")
+        # Click the actual link element (rather than navigating to its href
+        # directly) so any JS-driven confirmation/submission behavior the
+        # site relies on actually fires, the same as a real user clicking it.
+        delete_link.click()
+        page.wait_for_load_state("networkidle")
+
+        print(f"Clicked logout link for target session. Final URL: {page.url}")
+
+        # Verify the row is actually gone now
+        page.goto(SESSIONS_URL, wait_until="networkidle")
+        still_present = page.locator(f"tr:has(a[href*='delete={href.split('delete=')[1].split('&')[0]}'])").count()
+        if still_present > 0:
+            print("WARNING: Target session still appears in the list after clicking logout. Deletion may not have worked.")
+        else:
+            print("Confirmed: target session no longer appears in the list.")
 
         # --- Save (possibly refreshed) session state for the next run ---
         context.storage_state(path=STATE_FILE)
