@@ -1,4 +1,4 @@
-name: Mind Recalls Auto Re-login
+name: Re
 
 on:
   schedule:
