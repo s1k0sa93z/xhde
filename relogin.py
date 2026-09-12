@@ -1,14 +1,14 @@
 """
-Maintains ONE persistent login session on the Mind Recalls Moodle portal,
-and on every scheduled run, finds the newest OTHER active session (i.e. not
-the persistent one this script maintains) and logs that session out.
+Logs into the Mind Recalls Moodle portal FRESH every run, then finds the
+newest OTHER active session (i.e. the previous run's login, or any other
+active login) and logs it out. This naturally rotates through one live
+session at a time: each run's fresh login becomes "current" (and thus
+un-killable by itself), while the run's own fresh session is used to kill
+off the prior session, which is no longer current.
 
-How it works across runs:
-  - Session cookies are saved to storage_state.json after login.
-  - GitHub Actions caches that file between runs (see the workflow file),
-    so subsequent runs reuse the same login instead of logging in again.
-  - If the saved session has expired (e.g. Moodle timed it out), the script
-    automatically logs in again and saves a fresh session.
+Intended to be run on a schedule (e.g. every 5 minutes via GitHub Actions).
+Each run is fully independent -- no session state is persisted or reused
+between runs.
 
 Credentials are read from environment variables:
   MINDRECALLS_USERNAME
@@ -20,32 +20,54 @@ Usage:
 
 import os
 import sys
-import json
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 LOGIN_URL = "https://portal.mindrecalls.com/login/index.php"
 BASE_URL = "https://portal.mindrecalls.com"
 SESSIONS_URL = f"{BASE_URL}/report/usersessions/user.php"
-STATE_FILE = "storage_state.json"
 
-# Text Moodle uses to mark whichever row is the CURRENT session on this page.
-# We exclude this row from ever being logged out.
+# Text Moodle uses to mark whichever row is the CURRENT session on this page
+# (i.e. the session actually making this request). We exclude this row from
+# ever being logged out -- we only ever target OTHER sessions.
 CURRENT_SESSION_MARKERS = ["This session", "Current session"]
+
+NAV_TIMEOUT_MS = 45000
+
+
+def goto_sessions_page(page):
+    """Navigate to the sessions page robustly. Uses 'domcontentloaded'
+    instead of 'networkidle', since sites with background polling/analytics
+    can prevent the network from ever going fully idle, causing spurious
+    timeouts even though the page itself loaded fine. We then explicitly
+    wait for either a sessions table row or the login form to appear, which
+    tells us definitively that the page is actually ready."""
+    page.goto(SESSIONS_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    try:
+        page.wait_for_selector(
+            "table, #login, form#login",
+            timeout=NAV_TIMEOUT_MS,
+        )
+    except PlaywrightTimeoutError:
+        print("WARNING: Timed out waiting for expected page content, continuing anyway.")
 
 
 def is_logged_in(page) -> bool:
-    """After navigating to the sessions page, check whether we actually
-    landed on it (vs. being bounced to the login page, which means our
-    saved session was no longer valid)."""
+    """Check whether we actually landed on the sessions page (vs. being
+    bounced to the login page)."""
     return "login/index.php" not in page.url
 
 
 def do_login(page, username, password):
-    page.goto(LOGIN_URL, wait_until="networkidle")
+    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_selector("#username", timeout=NAV_TIMEOUT_MS)
     page.fill("#username", username)
     page.fill("#password", password)
     page.click("#loginbtn")
-    page.wait_for_load_state("networkidle")
+
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        pass
 
     if "login/index.php" in page.url:
         print("ERROR: Login appears to have failed. Check credentials or page structure.")
@@ -65,27 +87,13 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-
-        # --- Try to reuse a saved session from a previous run ---
-        have_saved_state = os.path.exists(STATE_FILE)
-        if have_saved_state:
-            print(f"Found saved session state ({STATE_FILE}), attempting to reuse it.")
-            context = browser.new_context(storage_state=STATE_FILE)
-        else:
-            print("No saved session state found. Will perform a fresh login.")
-            context = browser.new_context()
-
+        context = browser.new_context()
+        context.set_default_timeout(NAV_TIMEOUT_MS)
         page = context.new_page()
 
-        if have_saved_state:
-            page.goto(SESSIONS_URL, wait_until="networkidle")
-            if not is_logged_in(page):
-                print("Saved session appears to have expired. Logging in fresh.")
-                do_login(page, username, password)
-                page.goto(SESSIONS_URL, wait_until="networkidle")
-        else:
-            do_login(page, username, password)
-            page.goto(SESSIONS_URL, wait_until="networkidle")
+        # --- Always log in fresh this run ---
+        do_login(page, username, password)
+        goto_sessions_page(page)
 
         if not is_logged_in(page):
             print("ERROR: Still not logged in after login attempt. Aborting.")
@@ -99,13 +107,11 @@ def main():
         print(f"Found {row_count} session row(s) with a delete link.")
 
         if row_count == 0:
-            print("No deletable session rows found. Nothing to log out this run.")
-            context.storage_state(path=STATE_FILE)
+            print("No deletable session rows found (only this fresh login exists). Nothing to log out this run.")
             browser.close()
             return
 
-        # Debug visibility: print each row's visible text so we can confirm
-        # sort order / current-session wording on the first real run.
+        # Debug visibility: print each row's visible text.
         other_rows = []
         for i in range(row_count):
             row = all_rows_with_delete.nth(i)
@@ -116,15 +122,13 @@ def main():
                 other_rows.append(row)
 
         if len(other_rows) == 0:
-            print("Only the current (persistent) session was found. Nothing else to log out.")
-            context.storage_state(path=STATE_FILE)
+            print("Only the current (just-logged-in) session was found. Nothing else to log out.")
             browser.close()
             return
 
-        # ASSUMPTION: the sessions table lists rows newest-first, so the first
-        # "other" row is the newest non-persistent session. If this turns out
-        # to be wrong once you see real log output, tell me the row order and
-        # I'll adjust this to sort by parsed timestamp instead.
+        # ASSUMPTION: the sessions table lists rows newest-first, so the
+        # first "other" row is the most recent non-current session (i.e.
+        # almost always the previous run's login).
         target_row = other_rows[0]
         target_text = target_row.inner_text().replace("\n", " | ")
         print(f"Targeting this session to log out: \"{target_text[:150]}\"")
@@ -137,21 +141,21 @@ def main():
         # directly) so any JS-driven confirmation/submission behavior the
         # site relies on actually fires, the same as a real user clicking it.
         delete_link.click()
-        page.wait_for_load_state("networkidle")
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            print("WARNING: Timed out waiting for page after clicking logout link, continuing anyway.")
 
         print(f"Clicked logout link for target session. Final URL: {page.url}")
 
         # Verify the row is actually gone now
-        page.goto(SESSIONS_URL, wait_until="networkidle")
-        still_present = page.locator(f"tr:has(a[href*='delete={href.split('delete=')[1].split('&')[0]}'])").count()
+        delete_id = href.split("delete=")[1].split("&")[0]
+        goto_sessions_page(page)
+        still_present = page.locator(f"tr:has(a[href*='delete={delete_id}'])").count()
         if still_present > 0:
             print("WARNING: Target session still appears in the list after clicking logout. Deletion may not have worked.")
         else:
             print("Confirmed: target session no longer appears in the list.")
-
-        # --- Save (possibly refreshed) session state for the next run ---
-        context.storage_state(path=STATE_FILE)
-        print(f"Saved session state to {STATE_FILE} for next run.")
 
         browser.close()
 
