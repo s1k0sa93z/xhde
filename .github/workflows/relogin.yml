@@ -25,8 +25,28 @@ jobs:
           pip install playwright
           playwright install --with-deps chromium
 
+      # Restore the saved login session (cookies) from the most recent
+      # previous run, if one exists. We always save under a NEW unique key
+      # each run, but restore-keys lets us pick up the latest matching one.
+      - name: Restore saved session
+        uses: actions/cache/restore@v4
+        with:
+          path: storage_state.json
+          key: moodle-session-${{ github.run_id }}
+          restore-keys: |
+            moodle-session-
+
       - name: Run login/logout script
         env:
           MINDRECALLS_USERNAME: ${{ secrets.MINDRECALLS_USERNAME }}
           MINDRECALLS_PASSWORD: ${{ secrets.MINDRECALLS_PASSWORD }}
         run: python relogin.py
+
+      # Save the (possibly refreshed) session under a new key so the NEXT
+      # run can restore it via the "moodle-session-" prefix above.
+      - name: Save session for next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: storage_state.json
+          key: moodle-session-${{ github.run_id }}
