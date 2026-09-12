@@ -1,0 +1,32 @@
+name: Mind Recalls Auto Re-login
+
+on:
+  schedule:
+    # Runs every 5 minutes. GitHub's scheduler can drift a few minutes
+    # under load, so treat "5 minutes" as approximate, not exact.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # lets you manually trigger a run from the Actions tab
+
+jobs:
+  relogin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Run login/logout script
+        env:
+          MINDRECALLS_USERNAME: ${{ secrets.MINDRECALLS_USERNAME }}
+          MINDRECALLS_PASSWORD: ${{ secrets.MINDRECALLS_PASSWORD }}
+        run: python relogin.py
