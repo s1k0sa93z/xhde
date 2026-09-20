@@ -101,10 +101,15 @@ def main():
             browser.close()
             sys.exit(1)
 
-        # --- Inspect all session rows that have a delete link ---
+        # --- Inspect session rows that have a delete link ---
+        # The sessions table lists rows newest-first, and we only ever need
+        # the newest non-current one, so there's no reason to pull the whole
+        # table (which can be long) -- the first 10 rows are always enough.
+        MAX_ROWS_TO_CHECK = 10
         all_rows_with_delete = page.locator("tr:has(a[href*='delete='])")
-        row_count = all_rows_with_delete.count()
-        print(f"Found {row_count} session row(s) with a delete link.")
+        total_row_count = all_rows_with_delete.count()
+        row_count = min(total_row_count, MAX_ROWS_TO_CHECK)
+        print(f"Found {total_row_count} session row(s) with a delete link; checking the first {row_count}.")
 
         if row_count == 0:
             print("No deletable session rows found (only this fresh login exists). Nothing to log out this run.")
