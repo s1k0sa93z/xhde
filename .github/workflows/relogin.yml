@@ -20,10 +20,35 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          pip install playwright
-          playwright install --with-deps chromium
+      - name: Install Playwright Python package
+        run: pip install playwright
+
+      # Cache the downloaded browser binaries (not the pip package) so
+      # most runs can skip the ~100-150MB Chromium download entirely.
+      # Keyed on OS + the exact playwright version, so a version bump
+      # automatically busts the cache instead of using a stale browser.
+      - name: Get installed Playwright version
+        id: playwright-version
+        run: echo "version=$(pip show playwright | grep -i version | cut -d' ' -f2)" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browser binaries
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
+      # Only download the browser if the cache didn't already have it.
+      - name: Install Chromium (cache miss only)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install --with-deps chromium
+
+      # Even on a cache hit, OS-level shared libraries Chromium needs
+      # aren't part of the cached folder, so make sure they're present.
+      # This is fast (no browser re-download) when Chromium is cached.
+      - name: Install OS dependencies (cache hit only)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
 
       - name: Run login/logout script
         env:
