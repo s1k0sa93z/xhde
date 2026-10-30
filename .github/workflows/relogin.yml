@@ -1,11 +1,12 @@
-name: Re
+name: rfe
 
 on:
   schedule:
-    # Runs every 5 minutes. GitHub's scheduler can drift a few minutes
-    # under load, so treat "5 minutes" as approximate, not exact.
+    # Backup schedule in case the external dispatch trigger misses a beat.
+    # GitHub's own scheduler can be heavily delayed on low-activity repos,
+    # so this is a safety net, not the primary trigger.
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}   # lets you manually trigger a run from the Actions tab
+  workflow_dispatch: {}   # triggered externally every ~5 min, and usable manually too
 
 jobs:
   relogin:
@@ -19,14 +20,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install Playwright Python package
         run: pip install playwright
 
       # Cache the downloaded browser binaries (not the pip package) so
-      # most runs can skip the ~100-150MB Chromium download entirely.
-      # Keyed on OS + the exact playwright version, so a version bump
-      # automatically busts the cache instead of using a stale browser.
+      # most runs can skip the Chromium download entirely. Keyed on OS +
+      # the exact playwright version, so a version bump busts the cache.
       - name: Get installed Playwright version
         id: playwright-version
         run: echo "version=$(pip show playwright | grep -i version | cut -d' ' -f2)" >> $GITHUB_OUTPUT
